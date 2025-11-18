@@ -2,14 +2,14 @@
 job: extension
 config:
   # this name will be the folder and filename name
-  name: "my_first_flux_kontext_lora_v1"
+  name: "easytext_1024_english_seperate"
   process:
     - type: 'sd_trainer'
       # root folder to save training sessions/samples/weights
       training_folder: "output"
       # uncomment to see performance stats in the terminal every N steps
 #      performance_log_every: 1000
-      device: cuda:0
+      device: cuda:4
       # if a trigger word is specified, it will be added to captions of training data if it does not already exist
       # alternatively, in your captions you can add [trigger] and it will be replaced with the trigger word
 #      trigger_word: "p3r5on"
@@ -19,8 +19,8 @@ config:
         linear_alpha: 16
       save:
         dtype: float16 # precision to save
-        save_every: 250 # save every this many steps
-        max_step_saves_to_keep: 4 # how many intermittent saves to keep
+        save_every: 1000 # save every this many steps
+        max_step_saves_to_keep: 100 # how many intermittent saves to keep
         push_to_hub: false #change this to True to push your trained model to Hugging Face.
         # You can either set up a HF_TOKEN env variable or you'll be prompted to log-in         
 #       hf_repo_id: your-username/your-model-slug
@@ -31,22 +31,22 @@ config:
         # images will automatically be resized and bucketed into the resolution specified
         # on windows, escape back slashes with another backslash so
         # "C:\\path\\to\\images\\folder"
-        - folder_path: "/path/to/images/folder"
+        - folder_path: "/mnt/nfs/workspace/ghy/flow_grpo/dataset/customize_generation/product_labeled/English_product/English_generated_image_filtered_all"
           # control path is the input images for kontext for a paired dataset. These are the source images you want to change.  
           # You can comment this out and only use normal images if you don't have a paired dataset. 
           # Control images need to match the filenames on the folder path but in
           # a different folder. These do not need captions.
-          control_path: "/path/to/control/folder"
+          control_path: "/mnt/nfs/workspace/ghy/flow_grpo/dataset/customize_generation/product_labeled/English_product/English_condition_image_grid"
           caption_ext: "txt"
           caption_dropout_rate: 0.05  # will drop out the caption 5% of time
           shuffle_tokens: false  # shuffle caption order, split by commas
           cache_latents_to_disk: true  # leave this true unless you know what you're doing
           # Kontext runs images in at 2x the latent size. It may OOM at 1024 resolution with 24GB vram.
-          resolution: [ 512, 768 ]  # flux enjoys multiple resolutions
+          resolution: [ 1024 ]  # flux enjoys multiple resolutions
           # resolution: [ 512, 768, 1024 ]
       train:
         batch_size: 1
-        steps: 3000  # total number of steps to train 500 - 4000 is a good range
+        steps: 100000  # total number of steps to train 500 - 4000 is a good range
         gradient_accumulation_steps: 1
         train_unet: true
         train_text_encoder: false  # probably won't work with flux
@@ -58,7 +58,7 @@ config:
         # uncomment this to skip the pre training sample
 #        skip_first_sample: true
         # uncomment to completely disable sampling
-#        disable_sampling: true
+        disable_sampling: true
 
         # ema will smooth out learning, but could slow it down.
 
@@ -78,7 +78,7 @@ config:
 #        low_vram: true  # uncomment this if the GPU is connected to your monitors. It will use less vram to quantize, but is slower.
       sample:
         sampler: "flowmatch" # must match train.noise_scheduler
-        sample_every: 250 # sample every this many steps
+        sample_every: 1000 # sample every this many steps
         width: 1024
         height: 1024
         prompts:

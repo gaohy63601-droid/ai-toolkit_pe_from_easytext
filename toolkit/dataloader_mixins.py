@@ -852,6 +852,7 @@ class ControlFileItemDTOMixin:
         if hasattr(super(), '__init__'):
             super().__init__(*args, **kwargs)
         self.has_control_image = False
+        self.position_list = None
         self.control_path: Union[str, List[str], None] = None
         self.control_tensor: Union[torch.Tensor, None] = None
         self.control_tensor_list: Union[List[torch.Tensor], None] = None
@@ -868,14 +869,33 @@ class ControlFileItemDTOMixin:
             # we are using control images
             img_path = kwargs.get('path', None)
             file_name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
-            
+            prefix = file_name_no_ext.split("_")[0]
             found_control_images = []
             for control_path in control_path_list:
-                for ext in img_ext_list:
-                    if os.path.exists(os.path.join(control_path, file_name_no_ext + ext)):
-                        found_control_images.append(os.path.join(control_path, file_name_no_ext + ext))
+                for ext in [".png", ".PNG"]:
+                    if os.path.exists(os.path.join(control_path, prefix, file_name_no_ext + ext)):
+                        #print(f'Found ctrl image1 {file_name_no_ext}')
+                        found_control_images.append(os.path.join(control_path, prefix, file_name_no_ext + ext))
                         self.has_control_image = True
                         break
+                position_path = os.path.join(control_path, prefix, f"{prefix}_position.txt")
+                if os.path.exists(position_path):
+                    with open(position_path, "r", encoding="utf-8") as f:
+                        position_data = json.load(f)
+                    self.position_list = position_data
+                    #print(f"[ControlFileItemDTOMixin] Loaded position file for {prefix}: {len(position_data)} entries")
+
+            if len(found_control_images) > 0:
+                ctrl_dir = os.path.dirname(found_control_images[0])
+                jpg_candidates = [
+                    os.path.join(ctrl_dir, f)
+                    for f in os.listdir(ctrl_dir)
+                    if f.lower().endswith(".jpg")
+                ]
+                if len(jpg_candidates) == 1:
+                    found_control_images.append(jpg_candidates[0])
+                    #print(f"[ControlFileItemDTOMixin] Found ctrl_image2: {jpg_candidates[0]}")
+
             self.control_path = found_control_images
             if len(self.control_path) == 0:
                 self.control_path = None

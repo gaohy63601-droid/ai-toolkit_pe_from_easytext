@@ -22,7 +22,7 @@ from transformers import T5TokenizerFast, T5EncoderModel, CLIPTextModel, CLIPTok
 from einops import rearrange, repeat
 import random
 import torch.nn.functional as F
-from .pipeline_pe_clone import prepare_img_ids_new,prepare_img_ids_new_single_patch
+from .pipeline_pe_clone import prepare_img_ids_new
 if TYPE_CHECKING:
     from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
 
@@ -255,28 +255,15 @@ class FluxKontextModel(BaseModel):
             print('latent_model_input: ',latent_model_input.shape)
             # if we have a control on the channel dimension, put it on the batch for packing
             has_control = False
-
-            bs, c, h, w = latent_model_input.shape
-
-            BLOCK_C = 16
-
-            num_blocks = c // BLOCK_C
-            if num_blocks > 1:
+            if latent_model_input.shape[1] == 48:
                 # chunk it and stack it on batch dimension
                 # dont update batch size for img_its
-                blocks = torch.split(latent_model_input, BLOCK_C, dim=1)
-
-                lat = blocks[0]
-                control = blocks[1]
-                refs = blocks[2:]
-                height_condition, width_condition = refs[0].shape[2], refs[0].shape[3]
-                for r in refs:
-                    assert r.shape[2] == h and r.shape[3] == w
-
-                # batch 维拼起来 → [lat, control, ref1, ref2, ...]
-                latent_model_input = torch.cat([lat, control, *refs], dim=0)
+                lat, control, ref = torch.chunk(latent_model_input, 3, dim=1)
+                height_condition, width_condition = ref.shape[2], ref.shape[3]
+                #print(f"height_condition={height_condition}, width_condition={width_condition}")
+                assert height_condition==h and width_condition==w
+                latent_model_input = torch.cat([lat, control, ref], dim=0) #3B
                 has_control = True
-                ref_blocks = len(refs)
 
             latent_model_input_packed = rearrange(
                 latent_model_input,
@@ -285,30 +272,13 @@ class FluxKontextModel(BaseModel):
                 pw=2
             )
 
-            img_ids = torch.zeros(h // 2, w // 2, 3)
-            img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
-            img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
-            img_ids = repeat(img_ids, "h w c -> b (h w) c",
-                             b=bs).to(self.device_torch)
-
             # handle control image ids
             if has_control:
-                ctrl_ids = img_ids.clone()
-                ctrl_ids[..., 0] = 1
-                img_ids = torch.cat([img_ids, ctrl_ids], dim=1)
+                #print(dir(batch))
                 position_lists = batch.file_items[0].position_list
-                # # ====== DEBUG: 打印 position_list + grid 相关路径 ======
-                # fi0 = batch.file_items[0]
-                # position_lists = fi0.position_list
-
-                assert ref_blocks == len(position_lists), f"Assertion failed: ref_blocks={ref_blocks}, len(position_lists)={len(position_lists)}"
-
-                for i, pos_list in enumerate(position_lists):
-                    patch_ids = prepare_img_ids_new_single_patch(bs, height_condition//2,width_condition//2, h//2, w//2, pos_list)
-                    patch_ids = patch_ids.repeat(bs, 1, 1)
-                    patch_ids = patch_ids.to(device=self.device_torch,dtype=self.unet.dtype)
-                    img_ids = torch.cat([img_ids, patch_ids], dim=1)
-                
+                #print('position_lists: ', position_lists)
+                img_ids = prepare_img_ids_new(bs, height_condition//2,width_condition//2, h//2, w//2, position_lists)
+                img_ids = img_ids.to(device=self.device_torch,dtype=self.unet.dtype)
             else:
                 img_ids = torch.zeros(h // 2, w // 2, 3)
                 img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
@@ -344,17 +314,13 @@ class FluxKontextModel(BaseModel):
         latent_size = latent_model_input_packed.shape[1]
         # move the kontext channels. We have them on batch dimension to here, but need to put them on the latent dimension
         if has_control:
-            total_blocks = 1 + 1 + ref_blocks
-            blocks = torch.chunk(latent_model_input_packed, total_blocks, dim=0)
-
-            latent = blocks[0]
-            control = blocks[1]
-            refs = blocks[2:]
-
-            # 把 blocks 放回 latent 维度
-            latent_model_input_packed = torch.cat([latent, control, *refs], dim=1)
-
+            #print('has_control')
+            latent, control, ref = torch.chunk(latent_model_input_packed, 3, dim=0)
+            latent_model_input_packed = torch.cat(
+                [latent, control, ref], dim=1
+            )
             latent_size = latent.shape[1]
+
         noise_pred = self.unet(
             hidden_states=latent_model_input_packed.to(
                 self.device_torch, cast_dtype),
@@ -444,7 +410,7 @@ class FluxKontextModel(BaseModel):
                 else:
                     ctrl_tensor = control_tensor
                     ref_tensor = None
-
+                # we are not packed here, so we just need to pass them so we can pack them later
                 ctrl_tensor = ctrl_tensor * 2 - 1
                 ctrl_tensor = ctrl_tensor.to(self.vae_device_torch, dtype=self.torch_dtype)
                 
@@ -462,46 +428,22 @@ class FluxKontextModel(BaseModel):
                 control_latent = self.encode_images(ctrl_tensor).to(latents.device, latents.dtype)
                 latents = torch.cat((latents, control_latent), dim=1)
 
-                if ref_tensor is not None:
-                    # ref_tensor_raw: [B, C, H, W] in [0,1]
-                    ref_tensor_raw = ref_tensor
-
-                    B, C, H, W = ref_tensor_raw.shape
-                    assert H % 2 == 0 and W % 2 == 0, "ref_tensor H/W 必须能被 2 整除用于 2×2 拆块"
-                    patch_h, patch_w = H // 2, W // 2
-
-                    patches_raw = [
-                        ref_tensor_raw[:, :, 0:patch_h, 0:patch_w],        # 左上
-                        ref_tensor_raw[:, :, 0:patch_h, patch_w:W],        # 右上
-                        ref_tensor_raw[:, :, patch_h:H, 0:patch_w],        # 左下
-                        ref_tensor_raw[:, :, patch_h:H, patch_w:W],        # 右下
-                    ]
-
-
-                    position_lists = batch.file_items[0].position_list
-                    num_pos = len(position_lists)
-                    max_patches = len(patches_raw)  # 4
-                    # 通常 num_pos <= 4，如果数据有问题（>4），就只取前 4 个，避免越界
-                    if num_pos > max_patches:
-                        raise ValueError(
-                            f"position_list 有 {num_pos} 个条目，但 ref grid 只有 {max_patches} 个 patch，"
-                            f"请检查数据或缩减 position_list。"
-                        )
-
-                    num_ref_patches = num_pos
-                    for idx in range(num_ref_patches):
-                        patch_raw = patches_raw[idx]  # [B, C, h, w] in [0,1]
-
-                        # 需要 encode 的 patch：先做 [-1,1] 归一化
-                        patch_scaled = patch_raw * 2 - 1
-                        patch_scaled = patch_scaled.to(self.vae_device_torch, dtype=self.torch_dtype)
-
-                        if patch_scaled.shape[2] != target_h or patch_scaled.shape[3] != target_w:
-                            patch_scaled = F.interpolate(patch_scaled, size=(target_h, target_w), mode='bilinear')
-
-                        patch_latent = self.encode_images(patch_scaled).to(latents.device, latents.dtype)
-                        latents = torch.cat((latents, patch_latent), dim=1)
+                ref_tensor = ref_tensor * 2 - 1
+                ref_tensor = ref_tensor.to(self.vae_device_torch, dtype=self.torch_dtype)
                 
+                # if it is not the size of batch.tensor, (bs,ch,h,w) then we need to resize it
+                if batch.tensor is not None:
+                    target_h, target_w = batch.tensor.shape[2], batch.tensor.shape[3]
+                else:
+                    # When caching latents, batch.tensor is None. We get the size from the file_items instead.
+                    target_h = batch.file_items[0].crop_height
+                    target_w = batch.file_items[0].crop_width
+
+                if ref_tensor.shape[2] != target_h or ref_tensor.shape[3] != target_w:
+                    ref_tensor = F.interpolate(ref_tensor, size=(target_h, target_w), mode='bilinear')
+                    
+                ref_latent = self.encode_images(ref_tensor).to(latents.device, latents.dtype)
+                latents = torch.cat((latents, ref_latent), dim=1)
         return latents.detach() 
 
     def get_base_model_version(self):
